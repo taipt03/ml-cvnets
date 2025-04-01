@@ -48,7 +48,7 @@ optim:
     momentum: 0.9
 scheduler:
   name: "fixed"
-  max_epochs: 10
+  max_epochs: 30
   fixed:
     lr: 1.e-3
 model:
