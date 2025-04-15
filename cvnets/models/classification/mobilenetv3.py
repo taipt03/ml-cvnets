@@ -25,7 +25,7 @@ class MobileNetV3(BaseEncoder):
         width_mult = getattr(
             opts, "model.classification.mobilenetv3.width_multiplier", 1.0
         )
-        num_classes = getattr(opts, "model.classification.n_classes", 1000)
+        num_classes = 4
         classifier_dropout = getattr(
             opts, "model.classification.classifier_dropout", 0.0
         )
