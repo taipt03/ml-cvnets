@@ -41,7 +41,7 @@ def metric_monitor(
             metric_vals["grad_norm"] = grad_norm
 
     if "top1" in metric_names:
-        top_1_acc, top_5_acc = top_k_accuracy(pred_label, target_label, top_k=(1, 5))
+        top_1_acc, top_5_acc = top_k_accuracy(pred_label, target_label, top_k=(1, 4))
         top_1_acc = tensor_to_python_float(top_1_acc, is_distributed=use_distributed)
         metric_vals["top1"] = top_1_acc
         if "top5" in metric_names:
