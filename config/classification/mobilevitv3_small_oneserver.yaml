@@ -4,8 +4,8 @@ common:
   auto_resume: true
   mixed_precision: true
 dataset:
-  root_train: "Datasets/ILSVRC2012-raw/train"
-  root_val: "Datasets/ILSVRC2012-raw/val"
+  root_train: "/kaggle/working/dataset/train"
+  root_val: "/kaggle/working/dataset/val"
   name: "imagenet"
   category: "classification"
   train_batch_size0: 32
@@ -85,6 +85,6 @@ ddp:
   world_size: -1
   dist_port: 30786
 stats:
-  name: [ "loss", "top1", "top5" ]
+  name: [ "loss", "top1"]
   checkpoint_metric: "top1"
   checkpoint_metric_max: true
