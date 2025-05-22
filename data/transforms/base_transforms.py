@@ -1,6 +1,6 @@
 #
 # For licensing see accompanying LICENSE file.
-# Copyright (C) 2023 Apple Inc. All Rights Reserved.
+# Copyright (C) 2020 Apple Inc. All Rights Reserved.
 #
 
 import argparse
@@ -9,18 +9,18 @@ from typing import Dict
 
 class BaseTransformation(object):
     """
-    Base class for augmentation methods
+        Base class for transformations
     """
-
-    def __init__(self, opts, *args, **kwargs) -> None:
+    def __init__(self, opts):
+        super(BaseTransformation, self).__init__()
         self.opts = opts
 
-    def __call__(self, data: Dict) -> Dict:
+    def __call__(self, data: Dict):
         raise NotImplementedError
 
-    def __repr__(self) -> str:
-        return "{}()".format(self.__class__.__name__)
+    def __repr__(self):
+        return '{}()'.format(self.__class__.__name__)
 
     @classmethod
-    def add_arguments(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def add_arguments(cls, parser: argparse.ArgumentParser):
         return parser

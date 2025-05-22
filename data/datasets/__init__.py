@@ -1,155 +1,171 @@
 #
 # For licensing see accompanying LICENSE file.
-# Copyright (C) 2023 Apple Inc. All Rights Reserved.
+# Copyright (C) 2020 Apple Inc. All Rights Reserved.
 #
 
-import argparse
-from typing import Optional, Tuple
-
-from data.datasets.classification.base_image_classification_dataset import (
-    BaseImageClassificationDataset,
-)
-from data.datasets.classification.base_imagenet_shift_dataset import (
-    BaseImageNetShiftDataset,
-)
-from data.datasets.dataset_base import BaseDataset, BaseImageDataset, BaseVideoDataset
-from data.datasets.detection.base_detection import BaseDetectionDataset
-from data.datasets.multi_modal_img_text import arguments_multi_modal_img_text
-from data.datasets.segmentation.base_segmentation import BaseImageSegmentationDataset
+import os
+import importlib
 from utils import logger
+import argparse
 from utils.ddp_utils import is_master
-from utils.registry import Registry
+import glob
 
-DATASET_REGISTRY = Registry(
-    registry_name="dataset_registry",
-    base_class=BaseDataset,
-    lazy_load_dirs=["data/datasets"],
-    internal_dirs=["internal", "internal/projects/*"],
-)
+from .dataset_base import BaseImageDataset
 
 
-def build_dataset_from_registry(
-    opts: argparse.Namespace,
-    is_training: bool = True,
-    is_evaluation: bool = False,
-    *args,
-    **kwargs,
-) -> BaseDataset:
-    """Helper function to build a dataset from dataset registry
-
-    Args:
-        opts: Command-line arguments
-        is_training: Training mode or not. Defaults to True.
-        is_evaluation: Evaluation mode or not. Defaults to False.
-
-    Returns:
-        An instance of BaseDataset
+SUPPORTED_TASKS = []
+DATASET_REGISTRY = {}
 
 
-    ...note:
-        `is_training` is used to indicate whether the dataset is used for training or validation
-        On the other hand, `is_evaluation` mode is used to indicate the dataset is used for testing.
+def register_dataset(name, task):
+    def register_dataset_class(cls):
+        if name in DATASET_REGISTRY:
+            raise ValueError("Cannot register duplicate dataset class ({})".format(name))
 
-        Theoretically, `is_training=False` and `is_evaluation=True` should be the same. However, for some datasets
-        (especially segmentation), validation dataset transforms are different from
-        test transforms because each image has different resolution, making it difficult to construct
-        batches. Therefore, we treat these two modes different. For datasets, where validation and testing
-        transforms are the same, we set evaluation transforms the same as the validation transforms (e.g., in ImageNet
-        object classification).
-    """
+        if not issubclass(cls, BaseImageDataset):
+            raise ValueError(
+                "Dataset ({}: {}) must extend BaseImageDataset".format(name, cls.__name__)
+            )
 
-    dataset_category = getattr(opts, "dataset.category")
+        DATASET_REGISTRY[name + "_" + task] = cls
+        return cls
 
-    if dataset_category is None:
-        logger.error("Please specify dataset category using --dataset.category")
-
-    dataset_name = getattr(opts, f"dataset.name")
-    if dataset_name is None:
-        logger.error("Please specify dataset name using --dataset.name")
-
-    dataset = DATASET_REGISTRY[dataset_name, dataset_category](
-        opts=opts, is_training=is_training, is_evaluation=is_evaluation, *args, **kwargs
-    )
-    return dataset
+    return register_dataset_class
 
 
-def get_test_dataset(opts: argparse.Namespace, *args, **kwargs) -> BaseDataset:
-    """Helper function to build a dataset for testing.
-
-    Args:
-        opts: Command-line arguments
-
-    Returns:
-        An instance of BaseDataset
-    """
-
-    test_dataset = build_dataset_from_registry(
-        opts, is_training=False, is_evaluation=True, *args, **kwargs
-    )
-
-    if is_master(opts):
-        logger.log("Evaluation dataset details: ")
-        print("{}".format(test_dataset))
-
-    return test_dataset
+def supported_dataset_str(dataset_name, dataset_category):
+    supp_list = list(DATASET_REGISTRY.keys())
+    supp_str = "Dataset ({}) under task ({}) is not yet supported. \n Supported datasets are:".format(dataset_name,
+                                                                                                      dataset_category)
+    for t_name in SUPPORTED_TASKS:
+        supp_str += "\n\t {}: ".format(logger.color_text(t_name))
+        for i, m_name in enumerate(supp_list):
+            d_name, t_name1 = m_name.split('_')
+            if t_name == t_name1:
+                supp_str += "{} \t".format(d_name)
+    logger.error(supp_str)
 
 
-def get_train_val_datasets(
-    opts: argparse.Namespace, *args, **kwargs
-) -> Tuple[BaseDataset, Optional[BaseDataset]]:
-    """Helper function to build a dataset for training and validation.
+def evaluation_datasets(opts):
+    dataset_name = getattr(opts, "dataset.name", "imagenet")
+    dataset_category = getattr(opts, "dataset.category", "classification")
 
-    Args:
-        opts: Command-line arguments
-
-    Returns:
-        Training and (optionally) validation datasets.
-    """
-
-    disable_val = getattr(opts, "dataset.disable_val")
     is_master_node = is_master(opts)
-    train_dataset = build_dataset_from_registry(
-        opts, is_training=True, is_evaluation=False, *args, **kwargs
-    )
+
+    name_dataset_task = dataset_name + "_" + dataset_category
+    eval_dataset = None
+    if name_dataset_task in DATASET_REGISTRY:
+        eval_dataset = DATASET_REGISTRY[name_dataset_task](opts=opts, is_training=False, is_evaluation=True)
+    else:
+        supported_dataset_str(dataset_name=dataset_name, dataset_category=dataset_category)
+
     if is_master_node:
-        logger.log("Training dataset details are given below")
-        print(train_dataset)
+        logger.log('Evaluation dataset details: ')
+        print("{}".format(eval_dataset))
 
-    valid_dataset = None
-    if not disable_val:
-        valid_dataset = build_dataset_from_registry(
-            opts, is_training=False, is_evaluation=False, *args, **kwargs
-        )
-        if is_master_node:
-            logger.log("Validation dataset details are given below")
-            print(valid_dataset)
+    return eval_dataset
 
+
+def train_val_datasets(opts):
+    dataset_name = getattr(opts, "dataset.name", "imagenet")
+    dataset_category = getattr(opts, "dataset.category", "classification")
+
+    is_master_node = is_master(opts)
+
+    name_dataset_task = dataset_name + "_" + dataset_category
+    train_dataset = valid_dataset = None
+    if name_dataset_task in DATASET_REGISTRY:
+        train_dataset = DATASET_REGISTRY[name_dataset_task](opts=opts, is_training=True)
+        valid_dataset = DATASET_REGISTRY[name_dataset_task](opts=opts, is_training=False)
+    else:
+        supported_dataset_str(dataset_name=dataset_name, dataset_category=dataset_category)
+
+    if is_master_node:
+        logger.log('Training and validation dataset details: ')
+        print("{}".format(train_dataset))
+        print("{}".format(valid_dataset))
     return train_dataset, valid_dataset
 
 
-def arguments_dataset(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """Add dataset-specific arguments from BaseDataset, BaseImageDataset,
-    BaseImageClassificationDataset, BaseImageNetShiftDataset,
-    BaseVideoDataset, zero-shot datasets, and DATASET_REGISTRY.
-    """
-    parser = BaseDataset.add_arguments(parser)
-    parser = BaseImageDataset.add_arguments(parser)
-    parser = BaseImageSegmentationDataset.add_arguments(parser)
-    parser = BaseVideoDataset.add_arguments(parser)
-    parser = BaseImageClassificationDataset.add_arguments(parser)
-    parser = BaseImageNetShiftDataset.add_arguments(parser)
-    parser = BaseDetectionDataset.add_arguments(parser)
+def general_augmentation_args(parser: argparse.ArgumentParser):
+    group = parser.add_argument_group(title="Augmentation", description="Arguments related to dataset augmentation")
 
-    try:
-        from internal.utils.server_utils import dataset_server_args
+    # random gaussian noise
+    group.add_argument('--dataset.augmentation.gauss-noise-var', type=tuple, default=None,
+                       help='Random Gaussian noise variance range')
 
-        parser = dataset_server_args(parser)
-    except ImportError:
-        pass
+    # random jpeg compression
+    group.add_argument('--dataset.augmentation.jpeg_q_range', type=tuple, default=None,
+                       help='Quality factor range for JPEG compression')
 
-    # add multi-modal and zero-shot arguments
-    parser = arguments_multi_modal_img_text(parser=parser)
+    # random gamma correction
+    group.add_argument('--dataset.augmentation.gamma-corr-range', type=tuple, default=None,
+                       help='Gamma correction range')
+
+    # random blurring
+    group.add_argument('--dataset.augmentation.blur-kernel-range', type=tuple, default=None,
+                       help='Kernel range for blurring')
+
+    # random translate
+    group.add_argument('--dataset.augmentation.translate-factor', type=float, default=None,
+                       help='Translation factor. Randomly selected between 0 and translate_factor value')
+
+    # random rotate
+    group.add_argument('--dataset.augmentation.rotate_angle', type=int, default=None,
+                       help='Angle for random rotation. Sampled uniformly from (-angle, angle)')
+    return parser
+
+
+def general_dataset_args(parser: argparse.ArgumentParser):
+    group = parser.add_argument_group(title="Dataset", description="Arguments related to dataset")
+    group.add_argument('--dataset.root-train', type=str, default='', help='Root location of train dataset')
+    group.add_argument('--dataset.root-val', type=str, default='', help='Root location of valid dataset')
+    group.add_argument('--dataset.root-test', type=str, default='', help='Root location of test dataset')
+    group.add_argument('--dataset.name', type=str, default='imagenet', help='Dataset name')
+    group.add_argument('--dataset.category', type=str, default='classification',
+                       help='Dataset category (e.g., segmentation, classification)')
+    group.add_argument('--dataset.train-batch-size0', default=128, type=int, help='Training batch size')
+    group.add_argument('--dataset.val-batch-size0', default=1, type=int, help='Validation batch size')
+    group.add_argument('--dataset.eval-batch-size0', default=1, type=int, help='Validation batch size')
+    group.add_argument('--dataset.workers', default=-1, type=int, help='Number of data workers')
+    group.add_argument('--dataset.persistent-workers', action='store_true',
+                       help='Use same workers across all epochs in data loader')
+    group.add_argument('--dataset.pin-memory', action='store_true',
+                       help='Use pin memory option in data loader')
+
+    return parser
+
+
+def arguments_dataset(parser: argparse.ArgumentParser):
+    parser = general_dataset_args(parser=parser)
+
+    parser = general_augmentation_args(parser=parser)
 
     # add dataset specific arguments
-    parser = DATASET_REGISTRY.all_arguments(parser)
+    for k, v in DATASET_REGISTRY.items():
+        parser = v.add_arguments(parser=parser)
+
     return parser
+
+
+# automatically import the datasets
+dataset_dir = os.path.dirname(__file__)
+
+# supported tasks (each folder in datasets is for a particular task)
+for abs_dir_path in glob.glob("{}/*".format(dataset_dir)):
+    if os.path.isdir(abs_dir_path):
+        file_or_folder_name = os.path.basename(abs_dir_path).strip()
+        if not file_or_folder_name.startswith("_") and not file_or_folder_name.startswith("."):
+            SUPPORTED_TASKS.append(file_or_folder_name)
+
+for task in SUPPORTED_TASKS:
+    task_path = os.path.join(dataset_dir, task)
+    for file in os.listdir(task_path):
+        path = os.path.join(task_path, file)
+        if (
+                not file.startswith("_")
+                and not file.startswith(".")
+                and (file.endswith(".py") or os.path.isdir(path))
+        ):
+            dataset_name = file[: file.find(".py")] if file.endswith(".py") else file
+            module = importlib.import_module("data.datasets." + task + "." + dataset_name)

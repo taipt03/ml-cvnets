@@ -1,5 +1,3 @@
-.vscode/
-.coverage
 *.pyc
 __pycache__
 .DS_STORE
@@ -8,11 +6,6 @@ results*
 *.png
 *.jpg
 .idea
-*.swp
-.pytest_cache
-.mypy_cache
-
-build/
 
 results*
 vision_datasets/
@@ -20,14 +13,10 @@ exp_results/
 exp_results*
 results_*
 
+
 *.so
 model_zoo
 model_zoo/*
-pipeline.yaml
 
 cvnets.egg-info
 cvnets.egg-info/*
-
-venv/
-
-trash

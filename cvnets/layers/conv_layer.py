@@ -1,338 +1,56 @@
 #
 # For licensing see accompanying LICENSE file.
-# Copyright (C) 2023 Apple Inc. All Rights Reserved.
+# Copyright (C) 2020 Apple Inc. All Rights Reserved.
 #
 
+import torch
+from torch import nn, Tensor
+from typing import Optional
 import argparse
-from typing import Optional, Tuple, Type, Union
 
-from torch import Tensor, nn
-
-from cvnets.layers.activation import build_activation_layer
-from cvnets.layers.base_layer import BaseLayer
-from cvnets.layers.normalization.layer_norm import LayerNorm, LayerNorm2D_NCHW
-from cvnets.layers.normalization_layers import get_normalization_layer
 from utils import logger
+
+from .base_layer import BaseLayer
+from .normalization_layers import get_normalization_layer
+from .non_linear_layers import get_activation_fn
 
 
 class Conv2d(nn.Conv2d):
-    """
-    Applies a 2D convolution over an input.
-
-    Args:
-        in_channels: :math:`C_{in}` from an expected input of size :math:`(N, C_{in}, H_{in}, W_{in})`.
-        out_channels: :math:`C_{out}` from an expected output of size :math:`(N, C_{out}, H_{out}, W_{out})`.
-        kernel_size: Kernel size for convolution.
-        stride: Stride for convolution. Default: 1.
-        padding: Padding for convolution. Default: 0.
-        dilation: Dilation rate for convolution. Default: 1.
-        groups: Number of groups in convolution. Default: 1.
-        bias: Use bias. Default: ``False``.
-        padding_mode: Padding mode ('zeros', 'reflect', 'replicate' or 'circular'). Default: ``zeros``.
-        use_norm: Use normalization layer after convolution. Default: ``True``.
-        use_act: Use activation layer after convolution (or convolution and normalization).
-                                Default: ``True``.
-        act_name: Use specific activation function. Overrides the one specified in command line args.
-
-    Shape:
-        - Input: :math:`(N, C_{in}, H_{in}, W_{in})`.
-        - Output: :math:`(N, C_{out}, H_{out}, W_{out})`.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: Union[int, Tuple[int, int]],
-        stride: Optional[Union[int, Tuple[int, int]]] = 1,
-        padding: Optional[Union[int, Tuple[int, int]]] = 0,
-        dilation: Optional[Union[int, Tuple[int, int]]] = 1,
-        groups: Optional[int] = 1,
-        bias: Optional[bool] = False,
-        padding_mode: Optional[str] = "zeros",
-        *args,
-        **kwargs,
-    ) -> None:
-        super().__init__(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
-            bias=bias,
-            padding_mode=padding_mode,
-        )
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: tuple or int, stride: tuple or int,
+                 padding: tuple or int, dilation: int or tuple, groups: int, bias: bool, padding_mode: str,
+                 *args, **kwargs):
+        super(Conv2d, self).__init__(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
+                                     stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias,
+                                     padding_mode=padding_mode)
 
 
-class _BaseConvNormActLayer(BaseLayer):
-    """
-    Applies an N-dimensional convolution over an input.
-
-    Args:
-        opts: Command line options.
-        in_channels: :math:`C_{out}` from an expected output of size
-            :math:`(bs, C_{in}, X_{1}, ..., X_{N})`.
-        out_channels: :math:`C_{out}` from an expected output of size
-            :math:`(bs, C_{out}, Y_{1}, ..., Y_{N})`.
-        kernel_size: Kernel size for convolution. An integer, or tuple of length ``N``.
-        stride: Stride for convolution. An integer, or tuple of length ``N``. Default: 1.
-        dilation: Dilation rate for convolution. An integer, or tuple of length ``N``.
-            Default: ``1``.
-        padding: Padding for convolution. An integer, or tuple of length ``N``.
-            If not specified, padding is automatically computed based on kernel size and
-            dilation range. Default : ``None`` (equivalent to ``[
-            int((kernel_size[i] - 1) / 2) * dilation[i] for i in range(N)]``).
-        groups: Number of groups in convolution. Default: ``1``.
-        bias: Use bias. Default: ``False``.
-        padding_mode: Padding mode ('zeros', 'reflect', 'replicate' or 'circular').
-            Default: ``zeros``.
-        use_norm: Use normalization layer after convolution. Default: ``True``.
-        use_act: Use activation layer after convolution (or convolution and normalization).
-            Default: ``True``.
-        norm_layer: If not None, the provided normalization layer object will be used.
-            Otherwise, a normalization object will be created based on config
-            ``model.normalization.*`` opts.
-        act_layer: If not None, the provided activation function will be used.
-            Otherwise, an activation function will be created based on config
-            ``model.activation.*`` opts.
-
-    Shape:
-        - Input: :math:`(bs, C_{in}, X_{1}, ..., X_{N})`.
-        - Output: :math:`(bs, C_{out}, Y_{1}, ..., Y_{N})`.
-
-    .. note::
-        For depth-wise convolution, `groups=C_{in}=C_{out}`.
-    """
-
-    @property
-    def ndim(self) -> int:
-        raise NotImplementedError("subclasses should override ndim property")
-
-    @property
-    def module_cls(self) -> Type[nn.Module]:
-        raise NotImplementedError("subclasses should override module_cls property")
-
-    def __init__(
-        self,
-        opts: argparse.Namespace,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: Union[int, Tuple[int, ...]],
-        stride: Union[int, Tuple[int, ...]] = 1,
-        dilation: Union[int, Tuple[int, ...]] = 1,
-        padding: Optional[Union[int, Tuple[int, ...]]] = None,
-        groups: int = 1,
-        bias: bool = False,
-        padding_mode: str = "zeros",
-        use_norm: bool = True,
-        use_act: bool = True,
-        norm_layer: Optional[nn.Module] = None,
-        act_layer: Optional[nn.Module] = None,
-        *args,
-        **kwargs,
-    ) -> None:
-        super().__init__()
-
-        if norm_layer is None and use_norm:
-            norm_type = getattr(opts, "model.normalization.name")
-            if norm_type == "batch_norm":
-                norm_type = f"batch_norm_{self.ndim}d"
-            norm_layer = get_normalization_layer(
-                opts=opts, num_features=out_channels, norm_type=norm_type
-            )
-        elif norm_layer is not None and use_norm:
-            logger.error(
-                f"When use_norm is False, norm_layer should be None, but norm_layer={norm_layer} is provided."
-            )
-
-        if act_layer is None and use_act:
-            act_layer = build_activation_layer(opts, num_parameters=out_channels)
-        elif act_layer is not None and use_act:
-            logger.error(
-                f"When use_act is False, act_layer should be None, but act_layer={act_layer} is provided."
-            )
-
-        if (
-            use_norm
-            and any(param[0] == "bias" for param in norm_layer.named_parameters())
-            and bias
-        ):
-            assert (
-                not bias
-            ), "Do not use bias when using normalization layers with bias."
-
-        if use_norm and isinstance(norm_layer, (LayerNorm, LayerNorm2D_NCHW)):
-            bias = True
-
-        if isinstance(kernel_size, int):
-            kernel_size = (kernel_size,) * self.ndim
-
-        if isinstance(stride, int):
-            stride = (stride,) * self.ndim
-
-        if isinstance(dilation, int):
-            dilation = (dilation,) * self.ndim
-
-        assert isinstance(kernel_size, Tuple)
-        assert isinstance(stride, Tuple)
-        assert isinstance(dilation, Tuple)
-
-        if padding is None:
-            padding = (
-                int((kernel_size[i] - 1) / 2) * dilation[i] for i in range(self.ndim)
-            )
-
-        if in_channels % groups != 0:
-            logger.error(
-                "Input channels are not divisible by groups. {}%{} != 0 ".format(
-                    in_channels, groups
-                )
-            )
-        if out_channels % groups != 0:
-            logger.error(
-                "Output channels are not divisible by groups. {}%{} != 0 ".format(
-                    out_channels, groups
-                )
-            )
-
-        block = nn.Sequential()
-
-        conv_layer = self.module_cls(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=kernel_size,  # type: ignore
-            stride=stride,  # type: ignore
-            padding=padding,
-            dilation=dilation,  # type: ignore
-            groups=groups,
-            bias=bias,
-            padding_mode=padding_mode,
-        )
-
-        block.add_module(name="conv", module=conv_layer)
-
-        self.norm_name = None
-        if use_norm:
-            block.add_module(name="norm", module=norm_layer)
-            self.norm_name = norm_layer.__class__.__name__
-
-        self.act_name = None
-        if use_act:
-            block.add_module(name="act", module=act_layer)
-            self.act_name = act_layer.__class__.__name__
-
-        self.block = block
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.stride = stride
-        self.groups = groups
-        self.kernel_size = conv_layer.kernel_size
-        self.bias = bias
-        self.dilation = dilation
-
-    @classmethod
-    def add_arguments(cls, parser: argparse.ArgumentParser):
-        if cls != _BaseConvNormActLayer:
-            return parser
-        group = parser.add_argument_group(cls.__name__)
-        group.add_argument(
-            "--model.layer.conv-init",
-            type=str,
-            default="kaiming_normal",
-            help="Init type for conv layers",
-        )
-        parser.add_argument(
-            "--model.layer.conv-init-std-dev",
-            type=float,
-            default=None,
-            help="Std deviation for conv layers",
-        )
-        return parser
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.block(x)
-
-    def __repr__(self):
-        repr_str = self.block[0].__repr__()
-        repr_str = repr_str[:-1]
-
-        if self.norm_name is not None:
-            repr_str += ", normalization={}".format(self.norm_name)
-
-        if self.act_name is not None:
-            repr_str += ", activation={}".format(self.act_name)
-        repr_str += ")"
-        return repr_str
-
-
-class ConvLayer1d(_BaseConvNormActLayer):
-    ndim = 1
-    module_cls = nn.Conv1d
-
-
-class ConvLayer2d(_BaseConvNormActLayer):
-    ndim = 2
-    module_cls = Conv2d
-
-
-class ConvLayer3d(_BaseConvNormActLayer):
-    ndim = 3
-    module_cls = nn.Conv3d
-
-
-class TransposeConvLayer2d(BaseLayer):
-    """
-    Applies a 2D Transpose convolution (aka as Deconvolution) over an input.
-
-    Args:
-        opts: Command line arguments.
-        in_channels: :math:`C_{in}` from an expected input of size
-          :math:`(N, C_{in}, H_{in}, W_{in})`.
-        out_channels: :math:`C_{out}` from an expected output of size
-          :math:`(N, C_{out}, H_{out}, W_{out})`.
-        kernel_size: Kernel size for convolution.
-        stride: Stride for convolution. Default: 1.
-        dilation: Dilation rate for convolution. Default: 1.
-        groups: Number of groups in convolution. Default: 1.
-        bias: Use bias. Default: ``False``.
-        padding_mode: Padding mode. Default: ``zeros``.
-        use_norm: Use normalization layer after convolution. Default: ``True``.
-        use_act: Use activation layer after convolution (or convolution and normalization).
-        Default: ``True``.
-        padding: Padding will be done on both sides of each dimension in the input.
-        output_padding: Additional padding on the output tensor.
-        auto_padding: Compute padding automatically. Default: ``True``.
-
-    Shape:
-        - Input: :math:`(N, C_{in}, H_{in}, W_{in})`.
-        - Output: :math:`(N, C_{out}, H_{out}, W_{out})`.
-    """
-
-    def __init__(
-        self,
-        opts: argparse.Namespace,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: Union[int, Tuple],
-        stride: Optional[Union[int, Tuple]] = 1,
-        dilation: Optional[Union[int, Tuple]] = 1,
-        groups: Optional[int] = 1,
-        bias: Optional[bool] = False,
-        padding_mode: Optional[str] = "zeros",
-        use_norm: Optional[bool] = True,
-        use_act: Optional[bool] = True,
-        padding: Optional[Union[int, Tuple]] = (0, 0),
-        output_padding: Optional[Union[int, Tuple]] = None,
-        auto_padding: Optional[bool] = True,
-        *args,
-        **kwargs,
-    ):
-        super().__init__()
+class ConvLayer(BaseLayer):
+    def __init__(self, opts, in_channels: int, out_channels: int, kernel_size: int or tuple,
+                 stride: Optional[int or tuple] = 1,
+                 dilation: Optional[int or tuple] = 1, groups: Optional[int] = 1,
+                 bias: Optional[bool] = False, padding_mode: Optional[str] = 'zeros',
+                 use_norm: Optional[bool] = True, use_act: Optional[bool] = True,
+                 *args, **kwargs
+                 ) -> None:
+        """
+            Applies a 2D convolution over an input signal composed of several input planes.
+            :param opts: arguments
+            :param in_channels: number of input channels
+            :param out_channels: number of output channels
+            :param kernel_size: kernel size
+            :param stride: move the kernel by this amount during convolution operation
+            :param dilation: Add zeros between kernel elements to increase the effective receptive field of the kernel.
+            :param groups: Number of groups. If groups=in_channels=out_channels, then it is a depth-wise convolution
+            :param bias: Add bias or not
+            :param padding_mode: Padding mode. Default is zeros
+            :param use_norm: Use normalization layer after convolution layer or not. Default is True.
+            :param use_act: Use activation layer after convolution layer/convolution layer followed by batch
+            normalization or not. Default is True.
+        """
+        super(ConvLayer, self).__init__()
 
         if use_norm:
-            assert not bias, "Do not use bias when using normalization layers."
+            assert not bias, 'Do not use bias when using normalization layers.'
 
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
@@ -343,45 +61,165 @@ class TransposeConvLayer2d(BaseLayer):
         if isinstance(dilation, int):
             dilation = (dilation, dilation)
 
-        if output_padding is None:
-            output_padding = (stride[0] - 1, stride[1] - 1)
-
         assert isinstance(kernel_size, (tuple, list))
         assert isinstance(stride, (tuple, list))
         assert isinstance(dilation, (tuple, list))
 
-        if auto_padding:
-            padding = (
-                int((kernel_size[0] - 1) / 2) * dilation[0],
-                int((kernel_size[1] - 1) / 2) * dilation[1],
-            )
+        padding = (int((kernel_size[0] - 1) / 2) * dilation[0], int((kernel_size[1] - 1) / 2) * dilation[1])
 
         if in_channels % groups != 0:
-            logger.error(
-                "Input channels are not divisible by groups. {}%{} != 0 ".format(
-                    in_channels, groups
-                )
-            )
+            logger.error('Input channels are not divisible by groups. {}%{} != 0 '.format(in_channels, groups))
         if out_channels % groups != 0:
-            logger.error(
-                "Output channels are not divisible by groups. {}%{} != 0 ".format(
-                    out_channels, groups
-                )
-            )
+            logger.error('Output channels are not divisible by groups. {}%{} != 0 '.format(out_channels, groups))
 
         block = nn.Sequential()
-        conv_layer = nn.ConvTranspose2d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
-            bias=bias,
-            padding_mode=padding_mode,
-            output_padding=output_padding,
-        )
+
+        conv_layer = Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
+                            stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias,
+                            padding_mode=padding_mode)
+
+        block.add_module(name="conv", module=conv_layer)
+
+        self.norm_name = None
+        if use_norm:
+            norm_layer = get_normalization_layer(opts=opts, num_features=out_channels)
+            block.add_module(name="norm", module=norm_layer)
+            self.norm_name = norm_layer.__class__.__name__
+
+        self.act_name = None
+        act_type = getattr(opts, "model.activation.name", "prelu")
+
+        if act_type is not None and use_act:
+            neg_slope = getattr(opts, "model.activation.neg_slope", 0.1)
+            inplace = getattr(opts, "model.activation.inplace", False)
+            act_layer = get_activation_fn(act_type=act_type,
+                                          inplace=inplace,
+                                          negative_slope=neg_slope,
+                                          num_parameters=out_channels)
+            block.add_module(name="act", module=act_layer)
+            self.act_name = act_layer.__class__.__name__
+
+        self.block = block
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.stride = stride
+        self.groups = groups
+        self.kernel_size = conv_layer.kernel_size
+        self.bias = bias
+        self.dilation = dilation
+
+    @classmethod
+    def add_arguments(cls, parser: argparse.ArgumentParser):
+        cls_name = "{} arguments".format(cls.__name__)
+        group = parser.add_argument_group(title=cls_name, description=cls_name)
+        group.add_argument('--model.layer.conv-init', type=str, default='kaiming_normal',
+                           help='Init type for conv layers')
+        parser.add_argument('--model.layer.conv-init-std-dev', type=float, default=None,
+                            help='Std deviation for conv layers')
+        return parser
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.block(x)
+
+    def __repr__(self):
+        repr_str = self.block[0].__repr__()
+        repr_str = repr_str[:-1]
+
+        if self.norm_name is not None:
+            repr_str += ', normalization={}'.format(self.norm_name)
+
+        if self.act_name is not None:
+            repr_str += ', activation={}'.format(self.act_name)
+        repr_str += ', bias={})'.format(self.bias)
+        return repr_str
+
+    def profile_module(self, input: Tensor) -> (Tensor, float, float):
+        if input.dim() != 4:
+            logger.error(
+                'Conv2d requires 4-dimensional input (BxCxHxW). Provided input has shape: {}'.format(input.size()))
+
+        b, in_c, in_h, in_w = input.size()
+        assert in_c == self.in_channels, '{}!={}'.format(in_c, self.in_channels)
+
+        stride_h, stride_w = self.stride
+        groups = self.groups
+
+        out_h = in_h // stride_h
+        out_w = in_w // stride_w
+
+        k_h, k_w = self.kernel_size
+
+        # compute MACS
+        macs = (k_h * k_w) * (in_c * self.out_channels) * (out_h * out_w) * 1.0
+        macs /= groups
+
+        if self.bias:
+            macs += self.out_channels * out_h * out_w
+
+        # compute parameters
+        params = sum([p.numel() for p in self.parameters()])
+
+        output = torch.zeros(size=(b, self.out_channels, out_h, out_w), dtype=input.dtype, device=input.device)
+        # print(macs)
+        return output, params, macs
+
+
+class TransposeConvLayer(BaseLayer):
+    def __init__(self, opts, in_channels: int, out_channels: int, kernel_size: int or tuple,
+                 stride: Optional[int or tuple] = 1,
+                 dilation: Optional[int] = 1, groups: Optional[int] = 1,
+                 bias: Optional[bool] = False, padding_mode: Optional[str] = 'zeros',
+                 use_norm: Optional[bool] = True, use_act: Optional[bool] = True,
+                 padding: Optional[int or tuple] = (0, 0),
+                 auto_padding: Optional[bool] = True):
+        """
+        Applies a 2D Transpose Convolution over an input signal composed of several input planes.
+        :param opts: over an input signal composed of several input planes.
+        :param in_channels: number of input channels
+        :param out_channels: number of output channels
+        :param kernel_size: kernel size
+        :param stride: move the kernel by this amount during convolution operation
+        :param dilation: Add zeros between kernel elements to increase the effective receptive field of the kernel.
+        :param groups: Number of groups. If groups=in_channels=out_channels, then it is a depth-wise convolution
+        :param bias: Add bias or not
+        :param padding_mode: Padding mode. Default is zeros
+        :param use_norm: Use normalization layer after convolution layer or not. Default is True.
+        :param use_act: Use activation layer after convolution layer/convolution layer followed by batch normalization
+                        or not. Default is True.
+        :param padding: Padding
+        :param auto_padding: Compute padding automatically
+        """
+        super(TransposeConvLayer, self).__init__()
+
+        if use_norm:
+            assert not bias, 'Do not use bias when using normalization layers.'
+
+        if isinstance(kernel_size, int):
+            kernel_size = (kernel_size, kernel_size)
+
+        if isinstance(stride, int):
+            stride = (stride, stride)
+
+        if isinstance(dilation, (tuple, list)):
+            dilation = dilation[0]
+
+        assert isinstance(kernel_size, (tuple, list))
+        assert isinstance(stride, (tuple, list))
+        assert isinstance(dilation, int)
+
+        if auto_padding:
+            padding = (int((kernel_size[0] - 1)) * dilation, int((kernel_size[1] - 1)) * dilation)
+
+        if in_channels % groups != 0:
+            logger.error('Input channels are not divisible by groups. {}%{} != 0 '.format(in_channels, groups))
+        if out_channels % groups != 0:
+            logger.error('Output channels are not divisible by groups. {}%{} != 0 '.format(out_channels, groups))
+
+        block = nn.Sequential()
+        conv_layer = nn.ConvTranspose2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
+                                        stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias,
+                                        padding_mode=padding_mode)
 
         block.add_module(name="conv", module=conv_layer)
 
@@ -395,11 +233,12 @@ class TransposeConvLayer2d(BaseLayer):
         act_type = getattr(opts, "model.activation.name", "relu")
 
         if act_type is not None and use_act:
-            act_layer = build_activation_layer(
-                opts,
-                act_type=act_type,
-                num_parameters=out_channels,
-            )
+            neg_slope = getattr(opts, "model.activation.neg_slope", 0.1)
+            inplace = getattr(opts, "model.activation.inplace", False)
+            act_layer = get_activation_fn(act_type=act_type,
+                                          inplace=inplace,
+                                          negative_slope=neg_slope,
+                                          num_parameters=out_channels)
             block.add_module(name="act", module=act_layer)
             self.act_name = act_layer.__class__.__name__
 
@@ -420,29 +259,52 @@ class TransposeConvLayer2d(BaseLayer):
         repr_str = repr_str[:-1]
 
         if self.norm_name is not None:
-            repr_str += ", normalization={}".format(self.norm_name)
+            repr_str += ', normalization={}'.format(self.norm_name)
 
         if self.act_name is not None:
-            repr_str += ", activation={}".format(self.act_name)
-        repr_str += ")"
+            repr_str += ', activation={}'.format(self.act_name)
+        repr_str += ')'
         return repr_str
+
+    def profile_module(self, input: Tensor) -> (Tensor, float, float):
+        if input.dim() != 4:
+            logger.error(
+                'Conv2d requires 4-dimensional input (BxCxHxW). Provided input has shape: {}'.format(input.size()))
+
+        b, in_c, in_h, in_w = input.size()
+        assert in_c == self.in_channels, '{}!={}'.format(in_c, self.in_channels)
+
+        stride_h, stride_w = self.stride
+        groups = self.groups
+
+        out_h = in_h * stride_h
+        out_w = in_w * stride_w
+
+        k_h, k_w = self.kernel_size
+
+        # compute MACS
+        macs = (k_h * k_w) * (in_c * self.out_channels) * (out_h * out_w) * 1.0
+        macs /= groups
+
+        if self.bias:
+            macs += self.out_channels * out_h * out_w
+
+        # compute parameters
+        params = sum([p.numel() for p in self.parameters()])
+
+        output = torch.zeros(size=(b, self.out_channels, out_h, out_w), dtype=input.dtype, device=input.device)
+        # print(macs)
+        return output, params, macs
 
 
 class NormActLayer(BaseLayer):
-    """
-    Applies a normalization layer followed by an activation layer.
-
-    Args:
-        opts: Command-line arguments.
-        num_features: :math:`C` from an expected input of size :math:`(N, C, H, W)`.
-
-    Shape:
-        - Input: :math:`(N, C, H, W)`.
-        - Output: :math:`(N, C, H, W)`.
-    """
-
-    def __init__(self, opts, num_features, *args, **kwargs):
-        super().__init__()
+    def __init__(self, opts, num_features):
+        """
+            Applies a normalization layer followed by activation layer over an input tensor
+        :param opts: arguments
+        :param num_features: number of feature planes in the input tensor
+        """
+        super(NormActLayer, self).__init__()
 
         block = nn.Sequential()
 
@@ -452,10 +314,13 @@ class NormActLayer(BaseLayer):
         self.norm_name = norm_layer.__class__.__name__
 
         self.act_name = None
-        act_layer = build_activation_layer(
-            opts,
-            num_parameters=num_features,
-        )
+        act_type = getattr(opts, "model.activation.name", "prelu")
+        neg_slope = getattr(opts, "model.activation.neg_slope", 0.1)
+        inplace = getattr(opts, "model.activation.inplace", False)
+        act_layer = get_activation_fn(act_type=act_type,
+                                      inplace=inplace,
+                                      negative_slope=neg_slope,
+                                      num_parameters=num_features)
         block.add_module(name="act", module=act_layer)
         self.act_name = act_layer.__class__.__name__
 
@@ -464,128 +329,12 @@ class NormActLayer(BaseLayer):
     def forward(self, x: Tensor) -> Tensor:
         return self.block(x)
 
-    def __repr__(self):
-        repr_str = "{}(normalization={}, activation={})".format(
-            self.__class__.__name__, self.norm_type, self.act_type
-        )
-        return repr_str
-
-
-class _BaseSeparableConv(BaseLayer):
-    """
-    Applies an N-dimensional depth-wise separable convolution
-        <https://arxiv.org/abs/1610.02357> over an N-dimensional input tensor.
-
-    Args:
-        opts: Command line arguments.
-        in_channels: :math:`C_{in}` from an expected input of size
-            :math:`(N, C_{in}, X_{1}, ..., X_{N})`.
-        out_channels: :math:`C_{out}` from an expected output of size
-            :math:`(N, C_{out}, Y_{1}, ..., Y_{N})`.
-        kernel_size: Kernel size for convolution.
-        stride: Stride for convolution. Default: 1.
-        dilation: Dilation rate for convolution. Default: 1.
-        use_norm: Use normalization layer after convolution. Default: ``True``.
-        use_act: Use activation layer after convolution (or convolution and normalization).
-            Default: ``True``.
-        use_act_deptwise: Use activation layer after depthwise convolution (or
-            convolution and normalization). Default: ``False``.
-            NOTE: We recommend against using activation function in depth-wise convolution.
-        bias: Use bias. Default: ``False``.
-        padding_mode: Padding mode ('zeros', 'reflect', 'replicate' or 'circular').
-            Default: ``zeros``.
-        act_name: Use specific activation function. Overrides the one specified in
-            command line args. Default: ``None``.
-
-    Shape:
-        - Input: :math:`(N, C_{in}, X_{1}, ..., X_{N})`.
-        - Output: :math:`(N, C_{out}, Y_{1}, ..., Y_{N})`.
-
-    .. note::
-        For depth-wise convolution, `groups=C_{in}=C_{out}`.
-    """
-
-    def __init__(
-        self,
-        opts: argparse.Namespace,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: Union[int, Tuple[int, ...]],
-        stride: Union[int, Tuple[int, ...]] = 1,
-        dilation: Union[int, Tuple[int, ...]] = 1,
-        use_norm: bool = True,
-        use_act: bool = True,
-        use_act_depthwise: bool = False,
-        bias: bool = False,
-        padding_mode: str = "zeros",
-        act_name: Optional[str] = None,
-        *args,
-        **kwargs,
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        self.dw_conv = self.conv_layer_cls(
-            opts=opts,
-            in_channels=in_channels,
-            out_channels=in_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            dilation=dilation,
-            groups=in_channels,
-            bias=False,
-            padding_mode=padding_mode,
-            use_norm=True,
-            # NOTE: We recommend against using activation function in depth-wise convolution.
-            use_act=use_act_depthwise,
-            act_name=act_name,
-        )
-        self.pw_conv = self.conv_layer_cls(
-            opts=opts,
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=1,
-            stride=1,
-            dilation=1,
-            groups=1,
-            bias=bias,
-            padding_mode=padding_mode,
-            use_norm=use_norm,
-            use_act=use_act,
-            act_name=act_name,
-        )
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.stride = stride
-        self.kernel_size = kernel_size
-        self.dilation = dilation
-
-    @property
-    def conv_layer_cls(self):
-        raise NotImplementedError("Subclasses should override conv_layer_cls.")
+    def profile_module(self, input: Tensor) -> (Tensor, float, float):
+        # compute parameters
+        params = sum([p.numel() for p in self.parameters()])
+        macs = 0.0
+        return input, params, macs
 
     def __repr__(self):
-        repr_str = "{}(in_channels={}, out_channels={}, kernel_size={}, stride={}, dilation={})".format(
-            self.__class__.__name__,
-            self.in_channels,
-            self.out_channels,
-            self.kernel_size,
-            self.stride,
-            self.dilation,
-        )
+        repr_str = '{}(normalization={}, activation={})'.format(self.__class__.__name__, self.norm_type, self.act_type)
         return repr_str
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = self.dw_conv(x)
-        x = self.pw_conv(x)
-        return x
-
-
-class SeparableConv1d(_BaseSeparableConv):
-    conv_layer_cls = ConvLayer1d
-
-
-class SeparableConv2d(_BaseSeparableConv):
-    conv_layer_cls = ConvLayer2d
-
-
-class SeparableConv3d(_BaseSeparableConv):
-    conv_layer_cls = ConvLayer3d

@@ -1,6 +1,6 @@
 #
 # For licensing see accompanying LICENSE file.
-# Copyright (C) 2023 Apple Inc. All Rights Reserved.
+# Copyright (C) 2020 Apple Inc. All Rights Reserved.
 #
 
-from data.data_loaders import create_test_loader, create_train_val_loader
+from .data_loaders import create_train_val_loader, create_eval_loader

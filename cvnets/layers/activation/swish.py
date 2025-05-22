@@ -1,20 +1,17 @@
 #
 # For licensing see accompanying LICENSE file.
-# Copyright (C) 2023 Apple Inc. All Rights Reserved.
+# Copyright (C) 2020 Apple Inc. All Rights Reserved.
 #
 
-from typing import Optional
+from torch import nn, Tensor
 
-from torch import Tensor, nn
-
-from cvnets.layers.activation import register_act_fn
+from . import register_act_fn
 
 
 @register_act_fn(name="swish")
 class Swish(nn.SiLU):
-    """
-    Applies the `Swish (also known as SiLU) <https://arxiv.org/abs/1702.03118>`_ function.
-    """
+    def __init__(self, inplace: bool = False):
+        super(Swish, self).__init__(inplace=inplace)
 
-    def __init__(self, inplace: Optional[bool] = False, *args, **kwargs) -> None:
-        super().__init__(inplace=inplace)
+    def profile_module(self, input: Tensor) -> (Tensor, float, float):
+        return input, 0.0, 0.0

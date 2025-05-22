@@ -1,153 +1,90 @@
 #
 # For licensing see accompanying LICENSE file.
-# Copyright (C) 2023 Apple Inc. All Rights Reserved.
+# Copyright (C) 2020 Apple Inc. All Rights Reserved.
 #
 
-import argparse
-from typing import Dict, Optional, Tuple, Union
-
 from torch import Tensor
+from utils import logger
+from typing import Union, Dict, Tuple
 
-from cvnets.models import MODEL_REGISTRY, BaseAnyNNModel, get_model
-from cvnets.models.classification.base_image_encoder import BaseImageEncoder
-from cvnets.models.segmentation.base_seg import (
-    BaseSegmentation,
-    set_model_specific_opts_before_model_building,
-    unset_model_specific_opts_after_model_building,
-)
+from . import BaseSegmentation, register_segmentation_models
+from ..classification import BaseEncoder
+from .heads import build_segmentation_head
 
 
-@MODEL_REGISTRY.register(name="encoder_decoder", type="segmentation")
+@register_segmentation_models(name="encoder_decoder")
 class SegEncoderDecoder(BaseSegmentation):
-    """
-    This class defines a encoder-decoder architecture for the task of semantic segmentation. Different segmentation
-    heads (e.g., PSPNet and DeepLabv3) can be used
-
-    Args:
-        opts: command-line arguments
-        encoder (BaseImageEncoder): Backbone network (e.g., MobileViT or ResNet)
-    """
-
-    def __init__(
-        self, opts, encoder: BaseImageEncoder, seg_head, *args, **kwargs
-    ) -> None:
-        super().__init__(opts=opts, encoder=encoder)
+    def __init__(self, opts, encoder: BaseEncoder) -> None:
+        super(SegEncoderDecoder, self).__init__(opts=opts, encoder=encoder)
 
         # delete layers that are not required in segmentation network
         self.encoder.classifier = None
-        use_l5_exp = getattr(opts, "model.segmentation.use_level5_exp")
+        use_l5_exp = getattr(opts, "model.segmentation.use_level5_exp", False)
         if not use_l5_exp:
             self.encoder.conv_1x1_exp = None
 
-        self.maybe_seg_norm_layer()
-        self.seg_head = seg_head
+        self.seg_head = build_segmentation_head(opts=opts, enc_conf=self.encoder.model_conf_dict, use_l5_exp=use_l5_exp)
         self.use_l5_exp = use_l5_exp
-        self.set_default_norm_layer()
 
-    def get_trainable_parameters(
-        self,
-        weight_decay: Optional[float] = 0.0,
-        no_decay_bn_filter_bias: Optional[bool] = False,
-        *args,
-        **kwargs
-    ):
-        """This function separates the parameters for backbone and segmentation head, so that
-        different learning rates can be used for backbone and segmentation head
-        """
-        if getattr(self.encoder, "enable_layer_wise_lr_decay"):
-            encoder_params, enc_lr_mult = self.encoder.get_trainable_parameters(
-                weight_decay=weight_decay,
-                no_decay_bn_filter_bias=no_decay_bn_filter_bias,
-                module_name="encoder.",
-                *args,
-                **kwargs,
-            )
-        else:
-            encoder_params, enc_lr_mult = self.encoder.get_trainable_parameters(
-                weight_decay=weight_decay,
-                no_decay_bn_filter_bias=no_decay_bn_filter_bias,
-                module_name="encoder.",
-                *args,
-                **kwargs,
-            )
+    def get_trainable_parameters(self, weight_decay: float = 0.0, no_decay_bn_filter_bias: bool = False):
+        encoder_params, enc_lr_mult = self.encoder.get_trainable_parameters(
+            weight_decay=weight_decay,
+            no_decay_bn_filter_bias=no_decay_bn_filter_bias
+        )
         decoder_params, dec_lr_mult = self.seg_head.get_trainable_parameters(
             weight_decay=weight_decay,
-            no_decay_bn_filter_bias=no_decay_bn_filter_bias,
-            module_name="seg_head.",
-            *args,
-            **kwargs,
+            no_decay_bn_filter_bias=no_decay_bn_filter_bias
         )
 
         total_params = sum([p.numel() for p in self.parameters()])
         encoder_params_count = sum([p.numel() for p in self.encoder.parameters()])
         decoder_params_count = sum([p.numel() for p in self.seg_head.parameters()])
 
-        assert total_params == encoder_params_count + decoder_params_count, (
-            "Total network parameters are not equal to "
-            "the sum of encoder and decoder. "
-            "{} != {} + {}".format(
-                total_params, encoder_params_count, decoder_params_count
-            )
-        )
+        assert total_params == encoder_params_count + decoder_params_count, "Total network parameters are not equal to " \
+                                                                            "the sum of encoder and decoder. " \
+                                                                            "{} != {} + {}".format(total_params,
+                                                                                                   encoder_params_count,
+                                                                                                   decoder_params_count
+                                                                                                   )
 
         return encoder_params + decoder_params, enc_lr_mult + dec_lr_mult
 
-    def forward(
-        self, x: Tensor, *args, **kwargs
-    ) -> Union[Tuple[Tensor, Tensor], Tensor, Dict]:
-        enc_end_points: Dict = self.encoder.extract_end_points_all(
-            x, use_l5=True, use_l5_exp=self.use_l5_exp
-        )
+    def forward(self, x: Tensor) -> Union[Tuple[Tensor, Tensor], Tensor]:
+        enc_end_points: Dict = self.encoder.extract_end_points_all(x, use_l5=True, use_l5_exp=self.use_l5_exp)
+        return self.seg_head(enc_out=enc_end_points)
 
-        if "augmented_tensor" in enc_end_points:
-            output_dict = {
-                "augmented_tensor": enc_end_points.pop("augmented_tensor"),
-                "segmentation_output": self.seg_head(
-                    enc_out=enc_end_points, *args, **kwargs
-                ),
-            }
-            return output_dict
-        else:
-            return self.seg_head(enc_out=enc_end_points, *args, **kwargs)
+    def profile_model(self, input: Tensor):
+        # Note: Model profiling is for reference only and may contain errors.
+        # It relies heavily on the user to implement the underlying functions accurately.
 
-    def update_classifier(self, opts, n_classes: int) -> None:
-        """
-        This function updates the classification layer in a model. Useful for finetuning purposes.
-        """
-        if hasattr(self.seg_head, "update_classifier"):
-            self.seg_head.update_classifier(opts, n_classes)
+        overall_params, overall_macs = 0.0, 0.0
 
-    @classmethod
-    def build_model(cls, opts: argparse.Namespace, *args, **kwargs) -> BaseAnyNNModel:
+        logger.log('Model statistics for an input of size {}'.format(input.size()))
+        logger.double_dash_line(dashes=65)
+        print('{:>35} Summary'.format(self.__class__.__name__))
+        logger.double_dash_line(dashes=65)
 
-        output_stride = getattr(opts, "model.segmentation.output_stride", None)
-        image_encoder = get_model(
-            opts,
-            category="classification",
-            output_stride=output_stride,
-            *args,
-            **kwargs,
-        )
+        # profile encoder
+        enc_str = logger.text_colors['logs'] + logger.text_colors['bold'] + 'Encoder  ' + logger.text_colors[
+            'end_color']
+        print('{:>45}'.format(enc_str))
+        enc_end_points, encoder_params, encoder_macs = self.encoder.profile_model(input, is_classification=False)
+        overall_params += encoder_params
+        overall_macs += encoder_macs
 
-        default_opt_info = set_model_specific_opts_before_model_building(opts)
-        use_l5_exp = getattr(opts, "model.segmentation.use_level5_exp")
+        # profile decoder
+        dec_str = logger.text_colors['logs'] + logger.text_colors['bold'] + 'Decoder  ' + logger.text_colors[
+            'end_color']
+        print('{:>45}'.format(dec_str))
 
-        seg_head = get_model(
-            opts=opts,
-            category="segmentation_head",
-            model_name=getattr(opts, "model.segmentation.seg_head"),
-            enc_conf=image_encoder.model_conf_dict,
-            use_l5_exp=use_l5_exp,
-            *args,
-            **kwargs,
-        )
+        out, decoder_params, decoder_macs = self.seg_head.profile_module(enc_end_points)
+        overall_params += decoder_params
+        overall_macs += decoder_macs
 
-        seg_model = cls(opts, encoder=image_encoder, seg_head=seg_head, *args, **kwargs)
-
-        unset_model_specific_opts_after_model_building(
-            opts, default_opts_info=default_opt_info
-        )
-
-        if getattr(opts, "model.segmentation.freeze_batch_norm"):
-            cls.freeze_norm_layers(opts, model=seg_model)
-        return seg_model
+        logger.double_dash_line(dashes=65)
+        print('{:<20} = {:>8.3f} M'.format('Overall parameters', overall_params / 1e6))
+        # Counting Addition and Multiplication as 1 operation
+        print('{:<20} = {:>8.3f} M'.format('Overall MACs', overall_macs / 1e6))
+        overall_params_py = sum([p.numel() for p in self.parameters()])
+        print('{:<20} = {:>8.3f} M'.format('Overall parameters (sanity check)', overall_params_py / 1e6))
+        logger.double_dash_line(dashes=65)

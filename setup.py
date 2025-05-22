@@ -1,11 +1,9 @@
 #
 # For licensing see accompanying LICENSE file.
-# Copyright (C) 2023 Apple Inc. All Rights Reserved.
 #
 
 import os
 import sys
-
 from setuptools import find_packages, setup
 
 if sys.version_info < (3, 6):
@@ -16,7 +14,7 @@ if sys.platform == "darwin":
 else:
     extra_compile_args = ["-std=c++11", "-O3"]
 
-VERSION = 0.3
+VERSION = 0.1
 
 
 def do_setup(package_data):
@@ -36,17 +34,23 @@ def do_setup(package_data):
             "torch",
             "tqdm",
         ],
-        packages=find_packages(exclude=["config_files", "config_files.*"]),
+        packages=find_packages(
+            exclude=[
+                "config_files",
+                "config_files.*"
+            ]
+        ),
         package_data=package_data,
         test_suite="tests",
         entry_points={
             "console_scripts": [
                 "cvnets-train = main_train:main_worker",
+                "cvnets-train-dist = main_train_dist:main_worker",
                 "cvnets-eval = main_eval:main_worker",
                 "cvnets-eval-seg = main_eval:main_worker_segmentation",
                 "cvnets-eval-det = main_eval:main_worker_detection",
                 "cvnets-convert = main_conversion:main_worker_conversion",
-                "cvnets-loss-landscape = main_loss_landscape:main_worker_loss_landscape",
+                "cvnets-latency = main_latency:main_worker"
             ],
         },
         zip_safe=False,
@@ -65,5 +69,9 @@ def get_files(path, relative_to="."):
 
 
 if __name__ == "__main__":
-    package_data = {"cvnets": (get_files(os.path.join("cvnets", "config")))}
+    package_data = {
+        "cvnets": (
+            get_files(os.path.join("cvnets", "config"))
+        )
+    }
     do_setup(package_data)
